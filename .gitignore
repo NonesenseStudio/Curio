@@ -1,0 +1,54 @@
+# 依赖
+node_modules
+.pnp
+.pnp.js
+
+# 构建产物
+.next
+out
+build
+dist
+*.tsbuildinfo
+
+# 运行时数据（Curio 本地数据）
+.curio-data
+
+# 环境变量（.env.example 保留入库）
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env*.local
+
+# 日志与调试
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs
+*.log
+
+# 测试与覆盖率
+coverage
+.nyc_output
+
+# 类型生成（next dev/build 自动重建）
+next-env.d.ts
+
+# 部署
+.vercel
+
+# 工具产物
+.playwright-mcp
+.pnpm-store
+
+# 编辑器与系统文件
+.vscode
+.idea
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
