@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { useState } from "react";
 import { Bookmark, BookmarkCheck, FileText, Play } from "lucide-react";
 import type { FeedItem } from "@/lib/types";
 import { isSafeHttpsImage, safeYouTubeUrl } from "@/lib/safe-url";
@@ -22,7 +23,9 @@ export default function ArticleRow({
   onCreateNote,
 }: Props) {
   const title = item.title?.trim() || "未提供标题";
-  const image = isSafeHttpsImage(item.image) ? item.image : undefined;
+  const [failedImage, setFailedImage] = useState("");
+  const sourceImage = isSafeHttpsImage(item.image) ? item.image : undefined;
+  const image = sourceImage && sourceImage !== failedImage ? sourceImage : undefined;
   const videoUrl =
     item.contentType === "video" ? safeYouTubeUrl(item.link) : "";
   return (
@@ -35,7 +38,12 @@ export default function ArticleRow({
           aria-hidden="true"
         >
           {/* Feed images are external publisher artwork; alt text is supplied on the reading page. */}
-          <img src={image} alt="" loading="lazy" />
+          <img
+            src={image}
+            alt=""
+            loading="lazy"
+            onError={() => setFailedImage(image)}
+          />
         </Link>
       )}
       <div className="article-row-main">

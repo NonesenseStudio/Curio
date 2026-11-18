@@ -9,8 +9,11 @@ Curio is a personal content magazine built with Next.js App Router and TypeScrip
 
 ```sh
 pnpm install
+cp .env.example .env.local
 pnpm dev
 ```
+
+Set `RSSHUB_BASE_URL` in `.env.local` to the HTTPS origin of the private RSSHub instance before opening Curio. Curio reports a configuration error when it is missing or invalid; it does not fall back to a public RSSHub instance or fetch a publisher feed directly.
 
 Open http://localhost:3000.
 
@@ -27,22 +30,18 @@ The `/review` route redirects to `/notes` for old bookmarks.
 
 ## Feed and article handling
 
-Feed URLs are registered in `src/lib/sources.ts`. The server accepts HTTPS feeds from those registered hosts, resolves and pins public DNS addresses, limits redirects, response size, concurrency, and request time, and does not accept arbitrary fetch URLs. Feed metadata is returned separately from the source body candidate.
+Publisher identities and RSSHub route paths are registered in `src/lib/sources.ts`. Every enabled feed request goes to the configured RSSHub origin. Curio resolves and pins its public DNS addresses, checks every redirect, limits response size and request time, and does not accept arbitrary fetch URLs. Returned article links are checked against the registered publisher hosts and route path rules.
 
-Every current publisher has `bodyPolicy: "unknown"`. Until a source's treatment and caching rules are checked, Curio does not expose feed body candidates or fetch publisher pages. The in-site article page therefore shows the actual feed summary with an explicit status and a “查看原文” link. YouTube items remain videos and link to YouTube; Curio does not embed a player. Do not change a source policy to allow body display or web extraction without checking the source rules and a real feed sample first.
+An RSSHub response, a long candidate, and a complete article are separate checks. New and replacement publishers remain on the summary state until their source rules and real article samples have been reviewed. Curio does not expose raw feed candidates. Registered article pages are fetched only for sources with a verified body policy and matching host and path rules. YouTube items remain videos and link to YouTube; Curio does not embed a player.
 
-Private feed body candidates are kept only in the server data file for up to 24 hours and capped per item. They are never returned by `/api/feed` or `/api/articles/[articleId]`. The web extraction and HTML sanitation path remains disabled until source rules, allowed hosts, and a supported server DOM dependency have been verified.
+Raw feed candidates are kept in the private server archive for up to 24 hours, capped at 262,144 characters per article and 32 MiB across the archive. A candidate over the limit is recorded as unavailable instead of being treated as a complete body. Sanitized bodies have a separate 200,000-character limit, and known cuts are marked partial. Raw candidates and unverified HTML are never returned by `/api/feed` or `/api/articles/[articleId]`.
 
 ## Data and deployment
 
 Saved items, notes, explicit interests, hidden topics and sources, and reading positions are stored in browser `localStorage`; they are not uploaded or synced. The migration reads `curio:saved:v1`, `curio:notes:v1`, and `curio:muted:v1`, writes version 2 copies, verifies the migrated results, and leaves the original keys intact.
 
-Article metadata is stored in `.curio-data/articles-v1.json` by default. Set `CURIO_DATA_DIR` to a private persistent directory to change the location. The current store is intended for a single Node.js instance with persistent disk. Multi-instance or ephemeral hosting needs a shared database before deployment.
+Article metadata is stored in `.curio-data/articles-v1.json`; per-route last-success snapshots and retry state are stored in `.curio-data/feed-routes-v1.json`. Set `CURIO_DATA_DIR` to a private persistent directory to change the location. The current store is intended for a single Node.js instance with persistent disk. Multi-instance or ephemeral hosting needs a shared database before deployment.
 
 ## Sources
 
-Edit `src/lib/sources.ts` to add or change registered feed sources. YouTube channel feeds use the public RSS format:
-
-`https://www.youtube.com/feeds/videos.xml?channel_id=CHANNEL_ID`
-
-Use a channel ID rather than a display name. A public feed or publicly reachable page does not by itself establish permission to cache or display full article text.
+Edit `src/lib/sources.ts` to add or change registered feed routes. Keep the publisher identity and original article hosts separate from the RSSHub route. Retired publishers remain registered for saved articles and source-specific body rules but are omitted from refreshes. Do not enable body display based only on RSSHub returning a long description; check the publisher's rules and compare the candidate with the original article first.

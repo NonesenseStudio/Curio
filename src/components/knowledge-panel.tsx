@@ -2,8 +2,9 @@
 
 import { useMemo, useState } from "react";
 import { ArrowUpRight, Shuffle } from "lucide-react";
-import type { FeedItem, KnowledgeNote, SavedItem } from "@/lib/types";
+import type { FeedItem, KnowledgeNote, SavedItem, Topic } from "@/lib/types";
 import { formatDate, formatSavedDate } from "@/lib/format-date";
+import { noteTopic } from "@/lib/note-topic";
 import ArticleRow from "./article-row";
 import KnowledgeNoteModal, {
   type KnowledgeNoteDraft,
@@ -13,6 +14,9 @@ type Props = {
   mode: "saved" | "knowledge";
   saved: SavedItem[];
   notes: KnowledgeNote[];
+  feedItems: FeedItem[];
+  topicFilter: Topic | null;
+  onClearTopicFilter: () => void;
   onSave: (item: FeedItem) => void;
   onAddNote: (note: KnowledgeNoteDraft) => boolean;
   onNavigate: (path: string) => void;
@@ -33,6 +37,9 @@ export default function KnowledgePanel({
   mode,
   saved,
   notes,
+  feedItems,
+  topicFilter,
+  onClearTopicFilter,
   onSave,
   onAddNote,
   onNavigate,
@@ -41,29 +48,35 @@ export default function KnowledgePanel({
   const [noteItem, setNoteItem] = useState<FeedItem | null>(null);
   const [filter, setFilter] = useState<"all" | "article" | "video">("all");
   const [randomNoteId, setRandomNoteId] = useState("");
+
+  const noteArticles = useMemo(() => [...saved, ...feedItems], [saved, feedItems]);
+
   const savedItems = useMemo(
     () =>
       [...saved]
         .filter(
           (item) =>
-            filter === "all" ||
-            (filter === "video"
-              ? item.contentType === "video"
-              : item.contentType !== "video"),
+            (filter === "all" ||
+              (filter === "video"
+                ? item.contentType === "video"
+                : item.contentType !== "video")) &&
+            (!topicFilter || item.topic === topicFilter),
         )
         .sort(
           (a, b) =>
             new Date(b.savedAt).getTime() - new Date(a.savedAt).getTime(),
         ),
-    [saved, filter],
+    [saved, filter, topicFilter],
   );
   const orderedNotes = useMemo(
     () =>
-      [...notes].sort(
-        (a, b) =>
-          new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-      ),
-    [notes],
+      [...notes]
+        .filter((note) => !topicFilter || noteTopic(note, noteArticles) === topicFilter)
+        .sort(
+          (a, b) =>
+            new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
+        ),
+    [notes, noteArticles, topicFilter],
   );
   const randomNote = orderedNotes.find((note) => note.id === randomNoteId);
 
@@ -96,7 +109,9 @@ export default function KnowledgePanel({
             {mode === "saved" ? "收藏" : "灵感笔记"}
           </h1>
           <span className="panel-count">
-            {mode === "saved" ? `${saved.length} 项` : `${notes.length} 则`}
+            {mode === "saved"
+              ? `${savedItems.length} 项`
+              : `${orderedNotes.length} 则`}
           </span>
         </div>
         {mode === "knowledge" ? (
@@ -105,6 +120,19 @@ export default function KnowledgePanel({
           </button>
         ) : null}
       </header>
+
+      {topicFilter && (
+        <div className="topic-filter-row">
+          <span>主题：{topicFilter}</span>
+          <button
+            type="button"
+            className="text-action"
+            onClick={onClearTopicFilter}
+          >
+            清除主题筛选
+          </button>
+        </div>
+      )}
 
       {mode === "saved" && (
         <div className="filter-tabs" aria-label="收藏类型">
@@ -131,7 +159,13 @@ export default function KnowledgePanel({
       {mode === "saved" &&
         (savedItems.length === 0 ? (
           <div className="feed-empty">
-            <h2>{saved.length ? "没有符合条件的收藏" : "还没有收藏内容"}</h2>
+            <h2>
+              {topicFilter
+                ? "此主题还没有收藏"
+                : saved.length
+                  ? "没有符合条件的收藏"
+                  : "还没有收藏内容"}
+            </h2>
             <button
               type="button"
               className="button-primary"
@@ -210,7 +244,7 @@ export default function KnowledgePanel({
       {mode === "knowledge" &&
         (orderedNotes.length === 0 ? (
           <div className="feed-empty">
-            <h2>还没有笔记</h2>
+            <h2>{topicFilter ? "此主题还没有笔记" : "还没有笔记"}</h2>
             <p>可以从文章中摘录，也可以直接记下自己的想法。</p>
             <button type="button" className="button-primary" onClick={newNote}>
               新建笔记

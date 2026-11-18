@@ -9,11 +9,11 @@ export default function AntdProvider({ children }: { children: ReactNode }) {
       theme={{
         token: {
           colorPrimary: "#8E332A",
-          colorText: "#24211E",
-          colorTextSecondary: "#686159",
-          colorTextPlaceholder: "#686159",
-          colorBorder: "#B9B0A4",
-          colorBgElevated: "#FFFDFA",
+          colorText: "#222222",
+          colorTextSecondary: "#595959",
+          colorTextPlaceholder: "#595959",
+          colorBorder: "#D6D6D6",
+          colorBgElevated: "#FFFFFF",
           colorBgMask: "rgba(36, 33, 30, 0.42)",
           fontFamily: "var(--sans)",
           borderRadius: 5,

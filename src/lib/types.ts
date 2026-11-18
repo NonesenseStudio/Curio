@@ -24,6 +24,12 @@ export type ArticleStatus =
   | "unsupported";
 export type ContentCompleteness =
   "unknown" | "complete" | "partial" | "summary";
+/**
+ * How the server stores feed-fetch results. "unknown" means no write has been
+ * attempted yet (so failures cannot be claimed); only "unavailable" allows the
+ * UI to say the server could not persist records.
+ */
+export type ArchiveAvailability = "unknown" | "available" | "unavailable";
 
 export type FeedItem = {
   id: string;
@@ -40,6 +46,14 @@ export type FeedItem = {
   image?: string;
   imageAlt?: string;
   imageCredit?: string;
+  /** Declared width from the source feed markup, when the source states one. */
+  imageWidth?: number;
+  /**
+   * "declared" = source stated width >= 600 (safe for a large lead visual),
+   * "medium" = declared width >= 300, "unknown" = no usable size information.
+   * Unknown-size images must not be stretched into the main visual slot.
+   */
+  imageQuality?: "declared" | "medium" | "unknown";
   contentType: ArticleKind;
   contentStatus: ArticleStatus;
   contentCompleteness: ContentCompleteness;
@@ -47,11 +61,27 @@ export type FeedItem = {
 
 export type ArticleRecord = {
   item: FeedItem;
+  /** Last successful feed fetch that included this article. */
+  feedFetchedAt?: string;
   bodyCandidate?: string;
   candidateStoredAt?: string;
+  /** True when the stored candidate was cut at the persistence size limit. */
+  candidateTruncated?: boolean;
+  candidateError?: "too_large" | "storage_limit";
+  /** Digest of the newest feed candidate, retained after candidate expiry. */
+  candidateDigest?: string;
   bodyHtml?: string;
   bodyFetchedAt?: string;
+  /** SANITIZE_VERSION plus a digest of the stored body; output is gated on it. */
   bodyVersion?: string;
+  bodyCompleteness?: ContentCompleteness;
+  /** Where the stored body came from: feed payload or registered web page. */
+  bodySource?: "feed" | "web";
+  /** Private digest of the source value used to prepare this body. */
+  bodySourceDigest?: string;
+  bodyError?: string;
+  bodyAttempts?: number;
+  bodyNextAttemptAt?: string;
   processingMode?: "feed" | "readability" | "adapter";
 };
 
@@ -87,8 +117,15 @@ export type SavedItem = FeedItem & {
 
 export type ReadingPosition = {
   articleId: string;
+  /**
+   * Sanitized-body block fingerprint (the data-qf attribute), optionally
+   * followed by the previous block's fingerprint after a ":" — used when the
+   * target paragraph no longer exists in a newer content version.
+   */
   anchor: string;
+  /** Per-mille (0–1000) progress inside the anchored block. */
   offset: number;
+  /** Body version the position was taken against (pipeline bodyVersion). */
   contentVersion: string;
   updatedAt: string;
 };

@@ -1,17 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
-import { Bookmark, Compass, Lightbulb, Menu, Settings, X } from "lucide-react";
+import {
+  Bookmark,
+  Compass,
+  Lightbulb,
+  Menu,
+  Search,
+  Settings,
+  X,
+} from "lucide-react";
 import type {
+  ArchiveAvailability,
   FeedItem,
   KnowledgeNote,
   ReadingPosition,
   SavedItem,
   Topic,
 } from "@/lib/types";
-import { sources, topics } from "@/lib/sources";
+import { feedRoutes, sources, topics } from "@/lib/sources";
+import { canonicalArticleUrl } from "@/lib/article-link";
 import {
   getInterests,
   getMuted,
@@ -50,18 +60,23 @@ function getView(pathname: string): View {
   return "discover";
 }
 
+function articleLinkKey(sourceId: string, link: string) {
+  const canonical = canonicalArticleUrl(link);
+  return canonical ? `${sourceId}:${canonical}` : "";
+}
+
 function reconcileSaved(saved: SavedItem[], feed: FeedItem[]) {
   const byLegacyId = new Map<string, FeedItem>();
   const byLink = new Map<string, FeedItem>();
   for (const item of feed) {
     for (const legacyId of item.legacyIds || []) byLegacyId.set(legacyId, item);
-    if (item.link) byLink.set(item.link, item);
+    if (item.link) byLink.set(articleLinkKey(item.sourceId, item.link), item);
   }
   return saved.map((entry) => {
     const match =
       byLegacyId.get(entry.id) ||
       entry.legacyIds?.map((id) => byLegacyId.get(id)).find(Boolean) ||
-      byLink.get(entry.link);
+      byLink.get(articleLinkKey(entry.sourceId, entry.link));
     return match
       ? {
           ...match,
@@ -75,6 +90,86 @@ function reconcileSaved(saved: SavedItem[], feed: FeedItem[]) {
           ],
         }
       : entry;
+  });
+}
+
+function reconcileReadingPositions(
+  positions: ReadingPosition[],
+  saved: SavedItem[],
+  feed: FeedItem[],
+) {
+  const byId = new Map<string, FeedItem>();
+  const byLink = new Map<string, FeedItem>();
+  for (const item of feed) {
+    byId.set(item.id, item);
+    for (const legacyId of item.legacyIds || []) byId.set(legacyId, item);
+    if (item.link) byLink.set(articleLinkKey(item.sourceId, item.link), item);
+  }
+  const savedById = new Map<string, SavedItem>();
+  for (const item of saved) {
+    savedById.set(item.id, item);
+    for (const legacyId of item.legacyIds || []) savedById.set(legacyId, item);
+  }
+  return positions.map((position) => {
+    const direct = byId.get(position.articleId);
+    const savedItem = savedById.get(position.articleId);
+    const match =
+      direct ||
+      (savedItem
+        ? byLink.get(articleLinkKey(savedItem.sourceId, savedItem.link))
+        : undefined);
+    return match && match.id !== position.articleId
+      ? { ...position, articleId: match.id }
+      : position;
+  });
+}
+
+function reconcileNoteArticleIds(
+  notes: KnowledgeNote[],
+  saved: SavedItem[],
+  feed: FeedItem[],
+) {
+  const byId = new Map<string, FeedItem>();
+  const byLink = new Map<string, FeedItem>();
+  for (const item of feed) {
+    byId.set(item.id, item);
+    for (const legacyId of item.legacyIds || []) byId.set(legacyId, item);
+    if (item.link) byLink.set(articleLinkKey(item.sourceId, item.link), item);
+  }
+  const savedById = new Map<string, SavedItem>();
+  for (const item of saved) {
+    savedById.set(item.id, item);
+    for (const legacyId of item.legacyIds || []) savedById.set(legacyId, item);
+  }
+  return notes.map((note) => {
+    const savedItem = note.articleId
+      ? savedById.get(note.articleId)
+      : undefined;
+    let noteSourceId = note.articleId
+      ? sources.find((source) => note.articleId?.startsWith(`${source.id}-`))
+          ?.id
+      : undefined;
+    if (!noteSourceId && note.sourceUrl) {
+      try {
+        const host = new URL(note.sourceUrl).hostname.toLowerCase();
+        noteSourceId = sources.find((source) =>
+          source.articleHosts.includes(host),
+        )?.id;
+      } catch {
+        /* Leave notes with unregistered source links unchanged. */
+      }
+    }
+    const match =
+      (note.articleId ? byId.get(note.articleId) : undefined) ||
+      (note.sourceUrl && noteSourceId
+        ? byLink.get(articleLinkKey(noteSourceId, note.sourceUrl))
+        : undefined) ||
+      (savedItem
+        ? byLink.get(articleLinkKey(savedItem.sourceId, savedItem.link))
+        : undefined);
+    return match && note.articleId !== match.id
+      ? { ...note, articleId: match.id }
+      : note;
   });
 }
 
@@ -93,65 +188,223 @@ export default function AppShell() {
   const [mutedSources, setMutedSourcesState] = useState<string[]>([]);
   const [interests, setInterestsState] = useState<Topic[]>([]);
   const [loading, setLoading] = useState(true);
+  const [updating, setUpdating] = useState(false);
   const [requestError, setRequestError] = useState(false);
   const [allSourcesFailed, setAllSourcesFailed] = useState(false);
-  const [archiveAvailable, setArchiveAvailable] = useState(true);
-  const [failedSources, setFailedSources] = useState(0);
+  const [archiveAvailable, setArchiveAvailable] =
+    useState<ArchiveAvailability>("unknown");
+  const [routeCacheAvailable, setRouteCacheAvailable] =
+    useState<ArchiveAvailability>("unknown");
+  const [failedRoutes, setFailedRoutes] = useState(0);
+  const [failedRoutesWithCachedItems, setFailedRoutesWithCachedItems] =
+    useState(0);
   const [failedSourceIds, setFailedSourceIds] = useState<string[]>([]);
+  const [partialSourceIds, setPartialSourceIds] = useState<string[]>([]);
   const [updatedAt, setUpdatedAt] = useState("");
   const [query, setQuery] = useState("");
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const mobileMenuRef = useRef<HTMLDivElement>(null);
+  const mobileMenuToggleRef = useRef<HTMLButtonElement>(null);
+  const mobileSearchToggleRef = useRef<HTMLButtonElement>(null);
+  const mobileSearchInputRef = useRef<HTMLInputElement>(null);
+  const [topicFilter, setTopicFilter] = useState<Topic | null>(null);
   const [migrationError, setMigrationError] = useState(false);
   const [storageError, setStorageError] = useState("");
   const [actionMessage, setActionMessage] = useState("");
   const [sessionRestored, setSessionRestored] = useState(false);
   const [scrollRestoreY, setScrollRestoreY] = useState<number | null>(null);
 
+  const closeMobileMenu = useCallback(() => {
+    setMobileMenuOpen(false);
+    window.requestAnimationFrame(() => mobileMenuToggleRef.current?.focus());
+  }, []);
+
+  const closeMobileSearch = useCallback(() => {
+    setMobileSearchOpen(false);
+    window.requestAnimationFrame(() => mobileSearchToggleRef.current?.focus());
+  }, []);
+
+  useEffect(() => {
+    if (!mobileMenuOpen) return;
+    const menu = mobileMenuRef.current;
+    const focusable = menu?.querySelector<HTMLElement>("a[href]");
+    focusable?.focus();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        closeMobileMenu();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const nodes = menu
+        ? Array.from(
+            menu.querySelectorAll<HTMLElement>(
+              "a[href], button:not([disabled])",
+            ),
+          )
+        : [];
+      if (!nodes.length) return;
+      const first = nodes[0];
+      const last = nodes[nodes.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [mobileMenuOpen, closeMobileMenu]);
+
+  useEffect(() => {
+    if (view !== "discover") {
+      setMobileSearchOpen(false);
+      return;
+    }
+    if (!mobileSearchOpen) return;
+    mobileSearchInputRef.current?.focus();
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") closeMobileSearch();
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [view, mobileSearchOpen, closeMobileSearch]);
+
+  const feedRequest = useRef(0);
+  const feedVersion = useRef(0);
+  const feedItems = useRef(items);
+  feedItems.current = items;
   const loadFeed = useCallback(async (refresh = false) => {
-    setLoading(true);
+    const request = ++feedRequest.current;
+    setLoading(!feedItems.current.length);
+    setUpdating(refresh);
     setRequestError(false);
     try {
-      const response = await fetch(`/api/feed${refresh ? "?refresh=1" : ""}`, {
-        cache: "no-store",
-      });
+      const response = await fetch(
+        `/api/feed${refresh ? "?refresh=1" : "?mode=snapshot"}`,
+        {
+          cache: "no-store",
+        },
+      );
       if (!response.ok) throw new Error("feed_request_failed");
       const data = (await response.json()) as {
         items?: unknown;
-        failedSourceCount?: number;
         failedSourceIds?: unknown;
+        partialSourceIds?: unknown;
+        failedRouteCount?: number;
+        failedRoutesWithCachedItems?: number;
         allSourcesFailed?: boolean;
         updatedAt?: string;
-        archiveAvailable?: boolean;
+        archiveAvailable?: ArchiveAvailability;
+        routeCacheAvailable?: ArchiveAvailability;
+        updateAvailable?: boolean;
+        snapshotVersion?: number;
       };
+      if (request !== feedRequest.current) return;
       if (!Array.isArray(data.items)) throw new Error("invalid_feed_response");
+      type FeedResponse = typeof data;
+      const applyFeed = (data: FeedResponse, showItems: boolean) => {
+        if (!Array.isArray(data.items))
+          throw new Error("invalid_feed_response");
+        if ((data.snapshotVersion || 0) < feedVersion.current) return;
+        feedVersion.current = data.snapshotVersion || 0;
+        const nextItems = data.items as FeedItem[];
+        if (showItems)
+          setItems((current) =>
+            data.allSourcesFailed && nextItems.length === 0 && current.length
+              ? current
+              : nextItems,
+          );
+        const currentSaved = getSaved();
+        const reconciled = reconcileSaved(currentSaved, nextItems);
+        const savedUnchanged =
+          JSON.stringify(reconciled) === JSON.stringify(currentSaved);
+        const savedPersisted = savedUnchanged || setSaved(reconciled);
+        const savedForMigration = savedPersisted ? reconciled : currentSaved;
+        setSavedState(savedForMigration);
+        const currentPositions = getReadingPositions();
+        const nextPositions = reconcileReadingPositions(
+          currentPositions,
+          savedForMigration,
+          nextItems,
+        );
+        if (
+          JSON.stringify(nextPositions) !== JSON.stringify(currentPositions) &&
+          setReadingPositions(nextPositions)
+        ) {
+          setReadingPositionsState(nextPositions);
+        }
+        const currentNotes = getNotes();
+        const nextNotes = reconcileNoteArticleIds(
+          currentNotes,
+          savedForMigration,
+          nextItems,
+        );
+        if (
+          JSON.stringify(nextNotes) !== JSON.stringify(currentNotes) &&
+          setNotes(nextNotes)
+        )
+          setNotesState(nextNotes);
+        setFailedRoutes(
+          typeof data.failedRouteCount === "number" ? data.failedRouteCount : 0,
+        );
+        setFailedRoutesWithCachedItems(
+          typeof data.failedRoutesWithCachedItems === "number"
+            ? data.failedRoutesWithCachedItems
+            : 0,
+        );
+        setFailedSourceIds(
+          Array.isArray(data.failedSourceIds)
+            ? data.failedSourceIds.filter(
+                (id): id is string => typeof id === "string",
+              )
+            : [],
+        );
+        setPartialSourceIds(
+          Array.isArray(data.partialSourceIds)
+            ? data.partialSourceIds.filter(
+                (id): id is string => typeof id === "string",
+              )
+            : [],
+        );
+        setAllSourcesFailed(Boolean(data.allSourcesFailed));
+        setArchiveAvailable(
+          data.archiveAvailable === "available" ||
+            data.archiveAvailable === "unavailable"
+            ? data.archiveAvailable
+            : "unknown",
+        );
+        setRouteCacheAvailable(
+          data.routeCacheAvailable === "available" ||
+            data.routeCacheAvailable === "unavailable"
+            ? data.routeCacheAvailable
+            : "unknown",
+        );
+        if (typeof data.updatedAt === "string" && data.updatedAt)
+          setUpdatedAt(data.updatedAt);
+      };
       const nextItems = data.items as FeedItem[];
-      setItems((current) =>
-        data.allSourcesFailed && nextItems.length === 0 && current.length
-          ? current
-          : nextItems,
-      );
-      const reconciled = reconcileSaved(getSaved(), nextItems);
-      if (JSON.stringify(reconciled) !== JSON.stringify(getSaved()))
-        setSaved(reconciled);
-      setSavedState(reconciled);
-      setFailedSources(
-        typeof data.failedSourceCount === "number" ? data.failedSourceCount : 0,
-      );
-      setFailedSourceIds(
-        Array.isArray(data.failedSourceIds)
-          ? data.failedSourceIds.filter(
-              (id): id is string => typeof id === "string",
-            )
-          : [],
-      );
-      setAllSourcesFailed(Boolean(data.allSourcesFailed));
-      setArchiveAvailable(data.archiveAvailable !== false);
-      if (typeof data.updatedAt === "string" && data.updatedAt)
-        setUpdatedAt(data.updatedAt);
+      applyFeed(data, true);
+      if (!refresh && data.updateAvailable) {
+        setUpdating(true);
+        if (nextItems.length) setLoading(false);
+        const update = await fetch("/api/feed", { cache: "no-store" });
+        if (!update.ok) throw new Error("feed_update_failed");
+        const next = (await update.json()) as FeedResponse;
+        if (request !== feedRequest.current) return;
+        applyFeed(next, nextItems.length === 0);
+      }
     } catch {
+      if (request !== feedRequest.current) return;
+      setArchiveAvailable("unknown");
       setRequestError(true);
     } finally {
-      setLoading(false);
+      if (request === feedRequest.current) {
+        setLoading(false);
+        setUpdating(false);
+      }
     }
   }, []);
 
@@ -262,9 +515,43 @@ export default function AppShell() {
       setActiveTopic(topic as Topic | "全部");
   }, [pathname]);
 
+  useEffect(() => {
+    setReadingPositionsState(getReadingPositions());
+  }, [pathname]);
+
+  useEffect(() => {
+    function syncOnVisible() {
+      if (document.visibilityState === "visible")
+        setReadingPositionsState(getReadingPositions());
+    }
+    document.addEventListener("visibilitychange", syncOnVisible);
+    return () =>
+      document.removeEventListener("visibilitychange", syncOnVisible);
+  }, []);
+
+  useEffect(() => {
+    function syncFromUrl() {
+      if (pathname !== "/collections" && pathname !== "/notes") return;
+      const raw = new URLSearchParams(window.location.search).get("topic");
+      setTopicFilter(
+        topics.some((entry) => entry.name === raw) ? (raw as Topic) : null,
+      );
+    }
+    syncFromUrl();
+    window.addEventListener("popstate", syncFromUrl);
+    return () => window.removeEventListener("popstate", syncFromUrl);
+  }, [pathname]);
+
   function navigate(path: string) {
     setMobileMenuOpen(false);
     router.push(path, { scroll: false });
+  }
+
+  function clearTopicFilter() {
+    setTopicFilter(null);
+    router.push(pathname === "/notes" ? "/notes" : "/collections", {
+      scroll: false,
+    });
   }
 
   function toggleSave(item: FeedItem) {
@@ -391,7 +678,27 @@ export default function AppShell() {
   );
 
   return (
-    <div className="app-layout">
+    <div
+      className="app-layout"
+      onClickCapture={(event) => {
+        const target = event.target;
+        if (!(target instanceof Element)) return;
+        const href = target
+          .closest<HTMLAnchorElement>('a[href^="/read/"]')
+          ?.getAttribute("href");
+        if (!href) return;
+        const id = decodeURIComponent(href.slice(6).split(/[?#]/)[0]);
+        const item = [...items, ...saved].find(
+          (entry) => entry.id === id || entry.legacyIds?.includes(id),
+        );
+        if (item)
+          try {
+            sessionStorage.setItem(`curio:reader:${id}`, JSON.stringify(item));
+          } catch {
+            /* Reading still works without session storage. */
+          }
+      }}
+    >
       <header
         className={`topbar${view === "discover" ? " topbar-discovery" : ""}`}
       >
@@ -428,43 +735,120 @@ export default function AppShell() {
         <button
           type="button"
           className="mobile-menu-toggle"
-          onClick={() => setMobileMenuOpen((open) => !open)}
+          onClick={() =>
+            mobileMenuOpen ? closeMobileMenu() : setMobileMenuOpen(true)
+          }
           aria-label={mobileMenuOpen ? "关闭菜单" : "打开菜单"}
           aria-expanded={mobileMenuOpen}
+          aria-controls={mobileMenuOpen ? "mobile-menu-panel" : undefined}
+          ref={mobileMenuToggleRef}
         >
           {mobileMenuOpen ? <X size={21} /> : <Menu size={21} />}
         </button>
+        {view === "discover" && (
+          <button
+            type="button"
+            className="mobile-search-toggle"
+            onClick={() =>
+              mobileSearchOpen ? closeMobileSearch() : setMobileSearchOpen(true)
+            }
+            aria-label={mobileSearchOpen ? "关闭搜索" : "打开搜索"}
+            aria-expanded={mobileSearchOpen}
+            aria-controls={mobileSearchOpen ? "mobile-search-panel" : undefined}
+            ref={mobileSearchToggleRef}
+          >
+            {mobileSearchOpen ? (
+              <X size={20} aria-hidden="true" />
+            ) : (
+              <Search size={20} aria-hidden="true" />
+            )}
+          </button>
+        )}
       </header>
+
+      {mobileSearchOpen && view === "discover" && (
+        <div className="mobile-search-row" id="mobile-search-panel">
+          <form
+            role="search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              closeMobileSearch();
+            }}
+          >
+            <input
+              type="search"
+              aria-label="搜索标题、摘要或来源"
+              placeholder="搜索标题、摘要或来源"
+              value={query}
+              ref={mobileSearchInputRef}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            {query && (
+              <button
+                type="button"
+                className="icon-button"
+                aria-label="清空搜索"
+                onClick={() => {
+                  setQuery("");
+                  mobileSearchInputRef.current?.focus();
+                }}
+              >
+                <X size={17} aria-hidden="true" />
+              </button>
+            )}
+            <button
+              type="button"
+              className="text-action"
+              onClick={closeMobileSearch}
+            >
+              取消
+            </button>
+          </form>
+        </div>
+      )}
 
       {mobileMenuOpen && (
         <div
           className="mobile-menu-backdrop"
           onMouseDown={(event) =>
-            event.target === event.currentTarget && setMobileMenuOpen(false)
+            event.target === event.currentTarget && closeMobileMenu()
           }
         >
-          <nav className="mobile-menu" aria-label="页面菜单">
-            {navigation.map((entry) => (
-              <Link
-                key={entry.view}
-                href={entry.path}
-                scroll={false}
-                aria-current={view === entry.view ? "page" : undefined}
-                onClick={() => setMobileMenuOpen(false)}
-              >
-                {entry.icon}
-                {entry.label}
-              </Link>
-            ))}
-            <Link
-              href="/settings"
-              scroll={false}
-              onClick={() => setMobileMenuOpen(false)}
+          <div
+            className="mobile-menu"
+            id="mobile-menu-panel"
+            role="dialog"
+            aria-modal="true"
+            aria-label="页面菜单"
+            ref={mobileMenuRef}
+          >
+            <button
+              type="button"
+              className="mobile-menu-close"
+              aria-label="关闭菜单"
+              onClick={closeMobileMenu}
             >
-              <Settings size={17} aria-hidden="true" />
-              设置
-            </Link>
-          </nav>
+              <X size={20} aria-hidden="true" />
+            </button>
+            <nav className="mobile-menu-nav" aria-label="常用页面">
+              {navigation.map((entry) => (
+                <Link
+                  key={entry.view}
+                  href={entry.path}
+                  scroll={false}
+                  aria-current={view === entry.view ? "page" : undefined}
+                  onClick={closeMobileMenu}
+                >
+                  {entry.icon}
+                  {entry.label}
+                </Link>
+              ))}
+              <Link href="/settings" scroll={false} onClick={closeMobileMenu}>
+                <Settings size={17} aria-hidden="true" />
+                设置
+              </Link>
+            </nav>
+          </div>
         </div>
       )}
 
@@ -486,6 +870,7 @@ export default function AppShell() {
           <Dashboard
             items={items}
             loading={loading}
+            updating={updating}
             activeTopic={activeTopic}
             mutedTopics={muted}
             mutedSourceIds={mutedSources}
@@ -494,9 +879,12 @@ export default function AppShell() {
             saved={saved}
             requestError={requestError}
             allSourcesFailed={allSourcesFailed}
-            failedSources={failedSources}
+            failedRoutes={failedRoutes}
+            failedRoutesWithCachedItems={failedRoutesWithCachedItems}
             archiveAvailable={archiveAvailable}
+            routeCacheAvailable={routeCacheAvailable}
             readingPositions={readingPositions}
+            interests={interests}
             onTopic={setActiveTopic}
             onQuery={setQuery}
             onRefresh={() => void loadFeed(true)}
@@ -521,6 +909,9 @@ export default function AppShell() {
             mode="saved"
             saved={saved}
             notes={notes}
+            feedItems={items}
+            topicFilter={topicFilter}
+            onClearTopicFilter={clearTopicFilter}
             onSave={toggleSave}
             onAddNote={addNote}
             onNavigate={navigate}
@@ -531,6 +922,9 @@ export default function AppShell() {
             mode="knowledge"
             saved={saved}
             notes={notes}
+            feedItems={items}
+            topicFilter={topicFilter}
+            onClearTopicFilter={clearTopicFilter}
             onSave={toggleSave}
             onAddNote={addNote}
             onNavigate={navigate}
@@ -545,9 +939,11 @@ export default function AppShell() {
             <div className="settings-topic-list">
               {topics.map((topic) => {
                 const hidden = muted.includes(topic.name);
-                const count = sources.filter(
-                  (source) => source.topic === topic.name,
-                ).length;
+                const count = new Set(
+                  feedRoutes
+                    .filter((route) => route.topic === topic.name)
+                    .map((route) => route.sourceId),
+                ).size;
                 return (
                   <div className="settings-topic" key={topic.name}>
                     <div className="settings-topic-copy">
@@ -573,7 +969,7 @@ export default function AppShell() {
             </div>
             <div className="settings-information">
               <p>
-                发布者网页正文的处理规则尚未逐源核实，目前站内提供订阅摘要；选择“查看原文”可访问发布者页面。
+                普通文章仅在来源规则与原文样本核验后展示正文；视频和交互作品保留原类型与原站入口。
               </p>
               <p>
                 收藏、笔记、主题与来源设置、阅读位置保存在当前浏览器，不会跨设备同步。
@@ -591,20 +987,33 @@ export default function AppShell() {
               <p>隐藏的来源会从发现和随便看看中移除。</p>
               {sources.map((source) => {
                 const hidden = mutedSources.includes(source.id);
+                const sourceRoutes = feedRoutes.filter(
+                  (route) => route.sourceId === source.id,
+                );
                 return (
                   <div className="source-status-row" key={source.id}>
                     <strong>{source.name}</strong>
                     <span>
-                      {failedSourceIds.includes(source.id)
-                        ? "暂时无法更新"
-                        : source.kind === "youtube"
-                          ? "视频订阅"
-                          : "发布者订阅"}
+                      {!sourceRoutes.length
+                        ? "已停止更新"
+                        : failedSourceIds.includes(source.id)
+                          ? "暂时无法更新"
+                          : partialSourceIds.includes(source.id)
+                            ? "有栏目暂时无法更新"
+                            : source.kind === "youtube"
+                              ? "视频订阅"
+                              : "发布者订阅"}
                     </span>
                     <span>
-                      {source.kind === "youtube"
-                        ? "视频条目与观看入口"
-                        : "站内仅显示摘要"}
+                      {!sourceRoutes.length
+                        ? "已保存的文章仍可访问"
+                        : source.kind === "youtube"
+                          ? "视频条目与观看入口"
+                          : source.bodyPolicy === "feed"
+                            ? "订阅正文已核验，站内展示正文"
+                            : source.bodyPolicy === "web"
+                              ? "网页正文提取已核验，站内展示正文"
+                              : "站内仅显示摘要"}
                     </span>
                     <button
                       type="button"
